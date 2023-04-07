@@ -31,7 +31,7 @@ class GPyGP(BaseModel):
     Why doing so:
     - Input warped GP
     """
-    def __init__(self, num_cont, num_enum, num_out, **conf):
+    def __init__(self, num_ens, num_cont, num_enum, num_out, **conf):
         super().__init__(num_cont, num_enum, num_out, **conf)
         total_dim = num_cont
         if num_enum > 0:
@@ -44,6 +44,7 @@ class GPyGP(BaseModel):
         self.warp         = self.conf.get('warp', True)
         self.space        = self.conf.get('space') # DesignSpace
         self.num_restarts = self.conf.get('num_restarts', 10)
+        self.num_ens      = num_ens
         if self.space is None and self.warp:
             warnings.warn('Space not provided, set warp to False')
             self.warp = False
@@ -87,7 +88,10 @@ class GPyGP(BaseModel):
         k1  = GPy.kern.Linear(X.shape[1],   ARD = False)
         k2  = GPy.kern.Matern32(X.shape[1], ARD = True)
         k2.lengthscale = np.std(X, axis = 0).clip(min = 0.02)
-        k2.variance    = 0.5
+        if self.num_ens > 1:
+            k2.variance = np.random.uniform(0,2)
+        else:
+            k2.variance = 0.5
         k2.variance.set_prior(GPy.priors.Gamma(0.5, 1), warning = False)
         kern = k1 + k2
         if not self.warp:

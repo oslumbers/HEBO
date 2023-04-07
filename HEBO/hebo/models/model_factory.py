@@ -7,6 +7,8 @@
 # WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
 # PARTICULAR PURPOSE. See the MIT License for more details.
 
+from typing import List
+
 import torch
 from .base_model import BaseModel
 from .gp.svgp import SVGP
@@ -57,9 +59,16 @@ def get_model_class(model_name : str):
         return model_class
 
 
-def get_model(model_name : str, *params, **conf) -> BaseModel:
+def get_model(model_name : str, num_ens : int, *params, **conf) -> BaseModel:
     model_class = get_model_class(model_name)
-    return model_class(*params, **conf)
+    return model_class(num_ens, *params, **conf)
+
+def get_ensemble_models(model_name : str, num_ens : int, *params, **conf) -> List[BaseModel]:
+    models = []
+    for _ in range(num_ens):
+        model_class = get_model_class(model_name)
+        models.append(model_class(num_ens, *params, **conf))
+    return models
 
 class MultiTaskModel(BaseModel):
     """

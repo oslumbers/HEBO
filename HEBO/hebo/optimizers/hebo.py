@@ -19,7 +19,7 @@ from torch.quasirandom import SobolEngine
 from sklearn.preprocessing import power_transform
 
 from hebo.design_space.design_space import DesignSpace
-from hebo.models.model_factory import get_model
+from hebo.models.model_factory import get_model, get_ensemble_models
 from hebo.acquisitions.acq import MACE, Mean, Sigma
 from hebo.acq_optimizers.evolution_optimizer import EvolutionOpt
 
@@ -31,7 +31,7 @@ class HEBO(AbstractOptimizer):
     support_parallel_opt  = True
     support_combinatorial = True
     support_contextual    = True
-    def __init__(self, space, model_name = 'gpy', rand_sample = None, acq_cls = MACE, es = 'nsga2', model_config = None,
+    def __init__(self, space, num_ens=1, model_name = 'gpy', rand_sample = None, acq_cls = MACE, es = 'nsga2', model_config = None,
                  scramble_seed: Optional[int] = None ):
         """
         model_name  : surrogate model to be used
@@ -48,6 +48,8 @@ class HEBO(AbstractOptimizer):
         self.scramble_seed = scramble_seed
         self.sobol       = SobolEngine(self.space.num_paras, scramble = True, seed = scramble_seed)
         self.acq_cls     = acq_cls
+        self.num_ens     = num_ens
+        self.ensemble    = num_ens > 1
         self._model_config = model_config
 
     def quasi_sample(self, n, fix_input = None): 
@@ -131,16 +133,33 @@ class HEBO(AbstractOptimizer):
                         y = torch.FloatTensor(power_transform(self.y / self.y.std(), method = 'yeo-johnson'))
                 if y.std() < 0.5:
                     raise RuntimeError('Power transformation failed')
-                model = get_model(self.model_name, self.space.num_numeric, self.space.num_categorical, 1, **self.model_config)
-                model.fit(X, Xe, y)
+                if self.ensemble:
+                    ensemble = get_ensemble_models(self.model_name, self.num_ens, self.space.num_numeric, self.space.num_categorical, 1, **self.model_config)
+                    for member in ensemble:
+                        #TODO: DIFFERENT DATA FOR EACH MODEL
+                        member.fit(X, Xe, y)
+                else:
+                    model = get_model(self.model_name, self.num_ens, self.space.num_numeric, self.space.num_categorical, 1, **self.model_config)
+                    model.fit(X, Xe, y)
             except:
                 y     = torch.FloatTensor(self.y).clone()
-                model = get_model(self.model_name, self.space.num_numeric, self.space.num_categorical, 1, **self.model_config)
-                model.fit(X, Xe, y)
+                if self.ensemble:
+                    ensemble = get_ensemble_models(self.model_name, self.num_ens, self.space.num_numeric, self.space.num_categorical, 1, **self.model_config)
+                    for member in ensemble:
+                        #TODO: DIFFERENT DATA FOR EACH MODEL
+                        member.fit(X, Xe, y)
+                else:
+                    model = get_model(self.model_name, self.num_ens, self.space.num_numeric, self.space.num_categorical, 1, **self.model_config)
+                    model.fit(X, Xe, y)
 
+            
             best_id = self.get_best_id(fix_input)
             best_x  = self.X.iloc[[best_id]]
             best_y  = y.min()
+            for mod in ensemble:
+                py_best, ps2_best = mod.predict(*self.space.transform(best_x))
+                print(py_best, ps2_best)
+            
             py_best, ps2_best = model.predict(*self.space.transform(best_x))
             py_best = py_best.detach().numpy().squeeze()
             ps_best = ps2_best.sqrt().detach().numpy().squeeze()
