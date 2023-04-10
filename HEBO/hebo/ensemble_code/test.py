@@ -33,7 +33,7 @@ def tuner(
 
     if hebo_cfg is None:
         hebo_cfg = {}
-        hebo_cfg['num_ens'] = 2
+        hebo_cfg['num_ens'] = 1
     
     space = DesignSpace().parse(space_config)
     opt   = HEBO(space, **hebo_cfg)

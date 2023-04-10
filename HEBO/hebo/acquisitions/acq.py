@@ -12,11 +12,36 @@ import numpy as np
 from torch import Tensor
 from torch.distributions import Normal
 from abc import ABC, abstractmethod
+from typing import List
 from ..models.base_model import BaseModel
 
 class Acquisition(ABC):
     def __init__(self, model, **conf):
         self.model = model
+
+    @property
+    @abstractmethod
+    def num_obj(self):
+        pass
+
+    @property
+    @abstractmethod
+    def num_constr(self):
+        pass
+
+    @abstractmethod
+    def eval(self, x : Tensor,  xe : Tensor) -> Tensor:
+        """
+        Shape of output tensor: (x.shape[0], self.num_obj + self.num_constr)
+        """
+        pass
+
+    def __call__(self, x : Tensor,  xe : Tensor):
+        return self.eval(x, xe)
+
+class AcquisitionEns(ABC):
+    def __init__(self, models, **conf):
+        self.models = models
 
     @property
     @abstractmethod
@@ -52,6 +77,21 @@ class SingleObjectiveAcq(Acquisition):
     @property
     def num_constr(self):
         return 0
+    
+class SingleObjectiveAcqEns(AcquisitionEns):
+    """
+    Single-objective, unconstrained acquisition
+    """
+    def __init__(self, models : List[BaseModel], **conf):
+        super().__init__(models, **conf)
+
+    @property
+    def num_obj(self):
+        return 1
+
+    @property
+    def num_constr(self):
+        return 0
 
 class LCB(SingleObjectiveAcq):
     def __init__(self, model : BaseModel, **conf):
@@ -71,6 +111,19 @@ class Mean(SingleObjectiveAcq):
     def eval(self, x : Tensor, xe : Tensor) -> Tensor:
         py, _ = self.model.predict(x, xe)
         return py
+    
+class MeanEns(SingleObjectiveAcqEns):
+    def __init__(self, models : List[BaseModel], **conf):
+        super().__init__(models, **conf)
+        assert(models[0].num_out == 1)
+
+    def eval(self, x : Tensor, xe : Tensor) -> Tensor:
+        py, _ = self.models[0].predict(x, xe)
+        for mod in self.models[1:]:
+            py_mod, _ = mod.predict(x, xe)
+            py += py_mod
+
+        return py
 
 class Sigma(SingleObjectiveAcq):
     def __init__(self, model : BaseModel, **conf):
@@ -79,6 +132,19 @@ class Sigma(SingleObjectiveAcq):
 
     def eval(self, x : Tensor, xe : Tensor) -> Tensor:
         _, ps2 = self.model.predict(x, xe)
+        return -1 * ps2.sqrt()
+    
+class SigmaEns(SingleObjectiveAcqEns):
+    def __init__(self, models : List[BaseModel], **conf):
+        super().__init__(models, **conf)
+        assert(models[0].num_out == 1)
+
+    def eval(self, x : Tensor, xe : Tensor) -> Tensor:
+        _, ps2 = self.models[0].predict(x, xe)
+        for mod in self.models[1:]:
+            _, ps2_mod = mod.predict(x, xe)
+            ps2 += ps2_mod
+
         return -1 * ps2.sqrt()
 
 class EI(SingleObjectiveAcq):
@@ -150,6 +216,59 @@ class MACE(Acquisition):
         with torch.no_grad():
             py, ps2   = self.model.predict(x, xe)
             noise     = np.sqrt(2.0) * self.model.noise.sqrt()
+            ps        = ps2.sqrt().clamp(min = torch.finfo(ps2.dtype).eps)
+            lcb       = (py + noise * torch.randn(py.shape)) - self.kappa * ps
+            normed    = ((self.tau - self.eps - py - noise * torch.randn(py.shape)) / ps)
+            dist      = Normal(0., 1.)
+            log_phi   = dist.log_prob(normed)
+            Phi       = dist.cdf(normed)
+            PI        = Phi
+            EI        = ps * (Phi * normed +  log_phi.exp())
+            logEIapp  = ps.log() - 0.5 * normed**2 - (normed**2 - 1).log()
+            logPIapp  = -0.5 * normed**2 - torch.log(-1 * normed) - torch.log(torch.sqrt(torch.tensor(2 * np.pi)))
+
+            use_app             = ~((normed > -6) & torch.isfinite(EI.log()) & torch.isfinite(PI.log())).reshape(-1)
+            out                 = torch.zeros(x.shape[0], 3)
+            out[:, 0]           = lcb.reshape(-1)
+            out[:, 1][use_app]  = -1 * logEIapp[use_app].reshape(-1)
+            out[:, 2][use_app]  = -1 * logPIapp[use_app].reshape(-1)
+            out[:, 1][~use_app] = -1 * EI[~use_app].log().reshape(-1)
+            out[:, 2][~use_app] = -1 * PI[~use_app].log().reshape(-1)
+            return out
+        
+class MACEEns(AcquisitionEns):
+    def __init__(self, models, best_y, **conf):
+        super().__init__(models, **conf)
+        self.kappa = conf.get('kappa', 2.0)
+        self.eps   = conf.get('eps', 1e-4)
+        self.tau   = best_y
+    
+    @property
+    def num_constr(self):
+        return 0
+
+    @property
+    def num_obj(self):
+        return 3
+
+    def eval(self, x : torch.FloatTensor, xe : torch.LongTensor) -> torch.FloatTensor:
+        """
+        minimize (-1 * EI,  -1 * PI, lcb)
+        """
+        with torch.no_grad():
+            py, ps2   = self.models[0].predict(x, xe)
+            noise = np.sqrt(2.0) * self.models[0].noise.sqrt()
+            if len(self.models) > 1:
+                for mod in self.models[1:]:
+                    py_mod, ps2_mod = mod.predict(x, xe)
+                    noise_mod = np.sqrt(2.0) * mod.noise.sqrt()
+                    py += py_mod
+                    ps2 += ps2_mod
+                    noise += noise_mod
+            py /= len(self.models)
+            ps2 /= len(self.models)
+            noise /= len(self.models)
+
             ps        = ps2.sqrt().clamp(min = torch.finfo(ps2.dtype).eps)
             lcb       = (py + noise * torch.randn(py.shape)) - self.kappa * ps
             normed    = ((self.tau - self.eps - py - noise * torch.randn(py.shape)) / ps)
