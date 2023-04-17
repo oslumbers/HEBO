@@ -205,7 +205,7 @@ class HEBO(AbstractOptimizer):
     def check_unique(self, rec : pd.DataFrame) -> [bool]:
         return [(~pd.concat([self.X[i], rec], axis = 0).duplicated().tail(rec.shape[0]).values).tolist() for i in range(self.num_ens)]
 
-    def observe(self, X, y, ens_idx=0):
+    def observe(self, X, y, rand_samps=False, ens_idx=0):
         """Feed an observation back.
 
         Parameters
@@ -220,16 +220,25 @@ class HEBO(AbstractOptimizer):
             Which ensemble member to update the observation for (default 0)
         """
         #valid_id = np.where(np.isfinite(y.reshape(-1)))[0].tolist()
-        if X.shape[0] > 1:
-            valid_id = [ens_idx]
-            XX       = X.iloc[valid_id]
-            yy       = y[[0]].reshape(-1, 1)
+        XX = X.copy()
+        yy = y.copy()
+        
+        #if X.shape[0] > 1:
+        #    valid_id = [ens_idx]
+        #    XX       = X.iloc[valid_id]
+        #    yy       = y[[0]].reshape(-1, 1)
+        #else:
+        #    XX       = X.iloc[0]
+        #    yy       = y[[0]].reshape(-1, 1)
+        if rand_samps:
+            self.X[ens_idx]   = self.X[ens_idx].append(XX, ignore_index = True)
+            self.y[ens_idx]   = np.vstack([self.y[ens_idx], yy])
+        
         else:
-            XX       = X.iloc[0]
-            yy       = y[[0]].reshape(-1, 1)
-        self.X[ens_idx]   = self.X[ens_idx].append(XX, ignore_index = True)
-        self.y[ens_idx]   = np.vstack([self.y[ens_idx], yy])
-
+            for i in range(self.num_ens):
+                self.X[i]  = self.X[i].append(XX, ignore_index = True)
+                self.y[i]  = np.vstack([self.y[i], yy])
+            
     @property
     def best_x(self)->pd.DataFrame:
         if self.X.shape[0] == 0:
